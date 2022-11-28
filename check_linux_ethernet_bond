@@ -447,7 +447,7 @@ sub print_output {
    #
    #
    $interface_name = $bond;
-   $common_output_data = "mode:$bond_details{$bond}{mode} ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ";
+   $common_output_data = "${interface_name}_mode:$bond_details{$bond}{mode} ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ";
    #
    # if bond is in active-passive mode, add this value to commont output
    if ( $bond_details{$bond}{mode} eq "active-passive" ) {
