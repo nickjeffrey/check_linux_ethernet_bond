@@ -1,0 +1,487 @@
+#!/usr/bin/perl -w
+
+
+
+# DESCRIPTION
+# -----------
+#  This script is a nagios check that determines the health status of an ethernet bond
+
+
+# OUTSTANDING TASKS
+# ----------------
+#  
+
+
+# CHANGE LOG
+# ----------
+#  2022/11/28   njeffrey	Script created
+
+
+
+# NOTES
+# -----
+#
+#  This script should return one (and only one) line of ouput.  Multiple
+#  lines of output are silently ignored by nagios.
+#
+#  The line of output will become the body of the alert message sent by nagios
+#
+#
+#  You will need a section in the services.cfg
+#  file on the nagios server that looks similar to the following.
+#   define service{
+#           use                             generic-24x7-service
+#           host_name                       linux01.example.com
+#           service_description             NIC bond0
+#           check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_linux_ethernet_bond --bond=bond0"
+#           }
+#
+#
+#
+#
+
+
+
+use strict;                                     #enforce good coding practices
+use Getopt::Long;                               #allow --long-switches to be used as parameters
+
+
+# declare variables
+my ($OK,$WARN,$CRITICAL,$UNKNOWN);
+my ($CHECK_NAME,$host);
+my ($cmd,$key,$common_output_data,$perf_data);
+my ($output_message,$output_filename,$output_file_age);
+my (%bond_details,$bond,@slave_interface_names,$interface_name,$interface_detail);
+my ($opt_h,$opt_v,$opt_b);
+my ($verbose);
+my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
+my ($scratch,$count); 
+$CHECK_NAME= "NIC bond";
+$verbose = "no";                                #for debugging
+$output_filename = "/tmp/nagios.check_linux_ethernet_bond.tmp";  #temporary filename created by script
+
+
+#
+# Nagios return codes
+#
+$OK       = 0;
+$WARN     = 1;
+$CRITICAL = 2;
+$UNKNOWN  = 3;
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   print "running get_options subroutine \n" if ($verbose eq "yes");
+   #
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "h"   => \$opt_h, "help"        => \$opt_h,
+      "v"   => \$opt_v, "verbose"     => \$opt_v,
+      "b=s" => \$opt_b, "bond=s"      => \$opt_b,
+   );
+   #
+   # see if user provided -v or --verbose switch
+   if ( defined($opt_v) ) {
+      $verbose = "yes";
+   }                                                    #end of if block
+   #
+   # see if user provided -b or --bond switch
+   if ( defined($opt_b) ) {
+      $bond = $opt_b;
+   }                                                    #end of if block
+   #
+   #
+   # see if user provided -h or --help switch
+   if ( defined($opt_h) ) {
+      print "Nagios plugin for determining health of Linux dm-mulipath SAN disk paths \n";
+      print "$0 [options]  \n";
+      print "    where options are: \n";
+      print "    -h --help \n";
+      print "    -v --verbose \n";
+      print "\n\n";
+      exit;
+   }                                                    #end of if block
+}                       #end of subroutine
+
+
+
+sub sanity_checks {
+   #
+   print "running sanity_checks subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # Confirm required files exist
+   #
+   if ( ! -d "/proc/net/bonding" ) {
+      print "$CHECK_NAME UNKNOWN - cannot find /proc/net/bonding directory, is the bonding kernel module installed? \n";
+      exit $UNKNOWN;                                    #exit script
+   }
+   if ( ! -f "/proc/net/bonding/$bond" ) {
+      print "$CHECK_NAME UNKNOWN - cannot find /proc/net/bonding/$bond file, does the bond exist? \n";
+      exit $UNKNOWN;                                    #exit script
+   }
+}                                               #end of subroutine
+
+
+sub check_for_output_file {
+   #
+   # a cron job may have already created the output file that we need
+   #
+   print "running check_for_output_file subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # delete the output file if it is more than 4 minutes (240 seconds) old (this will work when run via root user but not when run as nagios user due to permissions)
+   $output_filename = "/tmp/nagios.check_linux_ethernet_bond_$bond.tmp";  #temporary filename created by script
+   if ( -e "$output_filename" )  {                                      #see if a cron job has already provided the info we need
+      ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($output_filename); #get last modification time in seconds since the epoch
+      $output_file_age = time - $mtime;                                 #figure out how many seconds old the file is
+      print "   output file $output_filename is $output_file_age seconds old \n" if ($verbose eq "yes");
+      if ( $output_file_age >= 60 ) {                                  #see if the file is more than 60 seconds old
+         if ( -w $output_filename )  {                                  #file is writable if this script executed by root, but read-only when executed via nagios
+            print "   deleting old copy of $output_filename \n" if ($verbose eq "yes");
+            unlink "$output_filename";                                  #delete the file if it is too old
+         }
+      }
+      if ( (-e "$output_filename") && ($output_file_age >= 900) ) {        #raise an alert if the file is more than 900 seconds old
+         print "$CHECK_NAME WARN - temporary file $output_filename not being automatically created via cron.  Please investigate. \n";
+         exit $WARN;                                                    #exit script
+      }                                                                 #end of if block
+   }                                                                    #end of if block
+   #
+   if ( -e "$output_filename" ) {                                       #see if a cron job has already provided the info we need
+      open (OUT,"$output_filename") or die "Cannot open $output_filename for reading $! \n";
+      while (<OUT>) {                                                   #read a line from the text file
+         $output_message = $_  if ( $_ =~ /[a-zA-Z]/);                  #get the content of the output file into a variable
+         print "   output message is $output_message \n" if ($verbose eq "yes");
+      }                                                                 #end of while loop
+      close OUT;                                                        #close filehandle
+      print $output_message;                                            #print the content of the output file
+      exit $CRITICAL if ( $output_message =~ /CRITICAL/ );              #exit script with appropriate return code
+      exit $WARN     if ( $output_message =~ /WARN/ );                  #exit script with appropriate return code
+      exit $UNKNOWN  if ( $output_message =~ /UNKNOWN/ );               #exit script with appropriate return code
+      exit $OK       if ( $output_message =~ /OK/ );                    #exit script with appropriate return code
+   }                                                                    #end of if block
+}                                                                       #end of subroutine
+
+
+
+
+sub print_to_outputfile {
+   #
+   print "running print_to_outputfile \n" if ($verbose eq "yes");
+   #
+   # This subroutine is called whenever an output message is printed, to confirm that the $output_file exists
+   #
+   # confirm the output message exists
+   $output_message = "$CHECK_NAME UNKNOWN - could not parse response from remote host \n" unless ($output_message);
+   #
+   # confirm the $output_filename variable is defined
+   unless ($output_filename) {
+      print "$CHECK_NAME UNKNOWN - the \$output_filename variable is not defined.  This might be a script bug. \n";
+      exit $UNKNOWN;                                                            #only get this far if OK/WARN/CRITICAL/UNKNOWN was not found in the output file
+   }                                                                            #end of unless block
+   #
+   if ( ! -e "$output_filename" ) {                                                     #only run this section if $output_filename does not already exist
+      print "   $output_filename not found - writing output message to $output_filename \n" if ($verbose eq "yes");
+      open (OUT,">$output_filename") or die "Cannot open $output_filename for writing: $! \n";
+      print OUT "$output_message";
+      close OUT;                                                                #close filehandle
+      chmod 0644, "$output_filename";                                           #set the file permission to -rw-r--r-- to ensure nagios user can read file
+   }                                                                            #end of if block
+}                                                                               #end of subroutine
+
+
+
+
+sub get_bonding_mode {
+   #
+   print "running get_bonding_mode subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   #
+   # Read the /proc/net/bonding/$bond file 
+   #
+   # A bond using LACP will look similar to the following:
+   # # cat /proc/net/bonding/bond0
+   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
+   #
+   # Bonding Mode: IEEE 802.3ad Dynamic link aggregation
+   # Transmit Hash Policy: layer2 (0)
+   # MII Status: up
+   # MII Polling Interval (ms): 100
+   # Up Delay (ms): 0
+   # Down Delay (ms): 0
+   # Peer Notification Delay (ms): 0
+   #
+   # 802.3ad info
+   # LACP rate: slow
+   # Min links: 0
+   # Aggregator selection policy (ad_select): stable
+   #
+   # Slave Interface: ens1f0
+   # MII Status: up
+   # Speed: 25000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0
+   # Permanent HW addr: 40:a6:b7:29:2e:60
+   # Slave queue ID: 0
+   # Aggregator ID: 1
+   # Actor Churn State: none
+   # Partner Churn State: none
+   # Actor Churned Count: 0
+   # Partner Churned Count: 0
+   #
+   # Slave Interface: ens1f1
+   # MII Status: up
+   # Speed: 25000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0
+   # Permanent HW addr: 40:a6:b7:29:2e:61
+   # Slave queue ID: 0
+   # Aggregator ID: 1
+   # Actor Churn State: none
+   # Partner Churn State: none
+   # Actor Churned Count: 0
+   # Partner Churned Count: 0
+   #
+   #
+   # A bond using active-backup will look similar to the following:
+   # ]$ cat /proc/net/bonding/bond1
+   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
+   #
+   # Bonding Mode: fault-tolerance (active-backup)
+   # Primary Slave: None
+   # Currently Active Slave: eno1
+   # MII Status: up
+   # MII Polling Interval (ms): 100
+   # Up Delay (ms): 0
+   # Down Delay (ms): 0
+   # Peer Notification Delay (ms): 0
+   #
+   # Slave Interface: eno1
+   # MII Status: up
+   # Speed: 10000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0
+   # Permanent HW addr: 38:68:dd:36:07:e0
+   # Slave queue ID: 0
+   #
+   # Slave Interface: eno2
+   # MII Status: up
+   # Speed: 10000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0
+   # Permanent HW addr: 38:68:dd:36:07:e1
+   # Slave queue ID: 0
+   # [nagios@lnv-db-cae-01 ~]$ cat /proc/net/bonding/bond1 |more
+   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
+   #
+   # Bonding Mode: fault-tolerance (active-backup)
+   # Primary Slave: None
+   # Currently Active Slave: eno1
+   # MII Status: up
+   # MII Polling Interval (ms): 100
+   # Up Delay (ms): 0
+   # Down Delay (ms): 0
+   # Peer Notification Delay (ms): 0
+   #
+   # Slave Interface: eno1
+   # MII Status: up
+   # Speed: 10000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0
+   # Permanent HW addr: 38:68:dd:36:07:e0
+   # Slave queue ID: 0
+   #
+   # Slave Interface: eno2
+   # MII Status: up
+   # Speed: 10000 Mbps
+   # Duplex: full
+   # Link Failure Count: 0 # Permanent HW addr: 38:68:dd:36:07:e1
+   # Slave queue ID: 0
+   #
+   $bond_details{$bond}{mode}   = "unknown";						#initialize hash element
+
+   $cmd = "/proc/net/bonding/$bond";
+   print "   reading file $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd ") or die "Cannot open $cmd for reading $! \n";			#open filehandle for reading
+   while (<IN>) {			#read a line from the filehandle
+      if ( /^Bonding Mode: IEEE 802.3ad Dynamic link aggregation/ ) { $bond_details{$bond}{mode} = "LACP"; }		
+      if ( /^Bonding Mode: fault-tolerance \(active-backup\)/ )     { $bond_details{$bond}{mode} = "active-backup"; }		
+   }						#end of while loop
+   close IN;					#close filehandle
+}
+
+
+
+
+sub get_slave_interface_names {
+   #
+   print "running get_slave_interface_names subroutine \n" if ($verbose eq "yes");
+   #
+   $cmd = "/proc/net/bonding/$bond";
+   print "   reading file $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd ") or die "Cannot open $cmd for reading $! \n";			#open filehandle for reading
+   while (<IN>) {			#read a line from the filehandle
+      if ( /^Slave Interface: (.*)/ ) { 
+         push (@slave_interface_names,$1);
+         print "   found slave interface $1 \n" if ($verbose eq "yes");
+       }		
+   }						#end of while loop
+   close IN;					#close filehandle
+}
+
+  
+
+ 
+sub get_bond_details {
+   #
+   print "running get_bond_details subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # slurp the entire file contents into a multiline string
+   open (my $fh, "<","/proc/net/bonding/$bond") or die "Cannot open file /proc/net/bonding/$bond $! \n";
+   my $bond_detail = do { local $/; <$fh> };                #used example from https://coderwall.com/p/wul1rg/slurp-a-file-into-a-scalar
+   close $fh or die "Cannot close filehandle $! \n";
+   #
+   # figure out the details for the master bond interface
+   #
+   $bond_details{$bond}{overall_link_failure_count} = 0;		#initialize hash element to avoid undef errors
+   $interface_name = $bond;
+   if ( $bond_detail =~ /(Bonding Mode: .*?)Slave Interface/s ) {
+      $interface_detail = $1;
+      print "-----------------begin master ----------------------- \n" if ($verbose eq "yes");
+      print "$interface_detail \n"                                     if ($verbose eq "yes");
+      print "-----------------end master ------------------------- \n" if ($verbose eq "yes");
+      if ( $interface_detail =~ /MII Status: (.*)/ ) { 
+         $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+         print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
+      }
+      # This parameter will exist if mode=active-backup, but not if mode=LACP
+      if ( $interface_detail =~ /Currently Active Slave: (.*)/ ) { 
+         $bond_details{$bond}{$interface_name}{currently_active_slave} = $1; 
+         print "   ${interface_name}_active_slave:$bond_details{$bond}{$interface_name}{currently_active_slave} \n" if ($verbose eq "yes");
+      }
+   }
+   #
+   # Get the details for each of the slave interface
+   #
+   $count = 0;
+   $interface_name = "";
+   foreach (@slave_interface_names) {
+      $interface_name = $slave_interface_names[$count];
+      print "   checking slave interface $interface_name \n" if ($verbose eq "yes");
+      # 
+      # This regex is for the stanza for slave interfaces if the master is in LACP mode
+      #
+      if ( $bond_detail =~ /(Slave Interface: $interface_name.*?)Partner Churned Count:/s ) { 		# use .*? instead of .* to make this a non-greedy match so we only get one stanza at a time
+         $interface_detail = $1;
+         print "-----------------begin slave $count----------------------- \n" if ($verbose eq "yes");
+         print "$interface_detail                                          \n" if ($verbose eq "yes");                             
+         print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
+         if ( $interface_detail =~ /MII Status: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+            print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Speed: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{speed} = $1; 
+            print "   ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Link Failure Count: ([0-9]+)/ ) { 
+            $bond_details{$bond}{$interface_name}{link_failure_count} = $1; 
+            $bond_details{$bond}{overall_link_failure_count} = $bond_details{$bond}{overall_link_failure_count} + $bond_details{$bond}{$interface_name}{link_failure_count};  #running total of all link failures on all adapters
+            
+            print "   ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Permanent HW addr: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{mac_address} = $1; 
+            print "   ${interface_name}_mac_address:$bond_details{$bond}{$interface_name}{mac_address} \n" if ($verbose eq "yes");
+         }
+      }
+      # 
+      # This regex is for the stanza for slave interfaces if the master is in active-backup mode
+      #
+      if ( $bond_detail =~ /(Slave Interface: $interface_name.*?)Slave queue ID:/s ) { 		# use .*? instead of .* to make this a non-greedy match so we only get one stanza at a time
+         $interface_detail = $1;
+         print "-----------------begin slave $count----------------------- \n" if ($verbose eq "yes");
+         print "$interface_detail                                          \n" if ($verbose eq "yes");
+         print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
+         if ( $interface_detail =~ /MII Status: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+            print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Speed: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{speed} = $1; 
+            print "   ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Link Failure Count: ([0-9]+)/ ) { 
+            $bond_details{$bond}{$interface_name}{link_failure_count} = $1; 
+            print "   ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count} \n" if ($verbose eq "yes");
+         }
+         if ( $interface_detail =~ /Permanent HW addr: (.*)/ ) { 
+            $bond_details{$bond}{$interface_name}{mac_address} = $1; 
+            print "   ${interface_name}_mac_address:$bond_details{$bond}{$interface_name}{mac_address} \n" if ($verbose eq "yes");
+         }
+      }
+      $count++;										#increment counter
+   } 
+}                                               #end of subroutine
+
+
+
+
+sub print_output {
+   #
+   print "running print_output subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # The nagios performance data will be the same for all the outputs, so just put it in a common variable
+   # The format is:  label=value[UOM];[warn];[crit];[min];[max]
+   # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
+   # You can have multiple items of perf data, just separate each section with a space
+   # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
+   $perf_data = "";
+   #
+   #
+   $interface_name = $bond;
+   $common_output_data = "mode:$bond_details{$bond}{mode} ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ";
+   #
+   # if bond is in active-passive mode, add this value to commont output
+   if ( $bond_details{$bond}{mode} eq "active-passive" ) {
+      $common_output_data = "$common_output_data active_slave:$bond_details{$bond}{$interface_name}{currently_active_slave} ";
+   }
+   #
+   # add the slave interfaces to the common output
+   foreach $interface_name (@slave_interface_names) {
+      $common_output_data = "$common_output_data ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count}";
+   }
+   #
+   if ( $bond_details{$bond}{overall_link_failure_count} > 0 ) {
+       $output_message = "$CHECK_NAME WARN - detected link failure count=$bond_details{$bond}{overall_link_failure_count}  $common_output_data | $perf_data \n";
+       print $output_message;			#print output to screen
+       print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
+       exit $WARN;
+   }
+   # we only get this far if everything is ok
+   $output_message = "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
+   print $output_message;			#print output to screen
+   print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
+   exit $OK;
+}                       #end of subroutine
+
+
+
+
+# ----------------- main body of script ---------------------------
+get_options;
+sanity_checks;
+check_for_output_file;
+get_bonding_mode;
+get_slave_interface_names;
+get_bond_details;
+print_output;
+
+
