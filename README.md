@@ -26,8 +26,8 @@ define service{
 # Output
 You will see output similar to the following:
 ```
-NIC bond OK - mode:active-backup bond0_status:up  eno1_status:up eno1_speed:10000 Mbps eno1_link_failure_count:0 eno2_status:up eno2_speed:10000 Mbps eno2_link_failure_count:0
+NIC bond OK - bond0_mode:active-backup bond0_status:up  eno1_status:up eno1_speed:10000 Mbps eno1_link_failure_count:0 eno2_status:up eno2_speed:10000 Mbps eno2_link_failure_count:0
 ```
 ```
-NIC bond OK - mode:LACP bond1_status:up  ens1f0_status:up ens1f0_speed:25000 Mbps ens1f0_link_failure_count:0 ens1f1_status:up ens1f1_speed:25000 Mbps ens1f1_link_failure_count:0
+NIC bond OK - bond1_mode:LACP bond1_status:up  ens1f0_status:up ens1f0_speed:25000 Mbps ens1f0_link_failure_count:0 ens1f1_status:up ens1f1_speed:25000 Mbps ens1f1_link_failure_count:0
 ```
