@@ -15,6 +15,7 @@
 # CHANGE LOG
 # ----------
 #  2022/11/28   njeffrey	Script created
+#  2022/12/08   njeffrey	If all ports in a bond are currently up, set alert threshold for "Link Failure Count" to 100 
 
 
 
@@ -95,12 +96,13 @@ sub get_options {
    #
    #
    # see if user provided -h or --help switch
-   if ( defined($opt_h) ) {
+   if ( (defined($opt_h)) || (!defined($opt_b))  ) {
       print "Nagios plugin for determining health of Linux dm-mulipath SAN disk paths \n";
       print "$0 [options]  \n";
       print "    where options are: \n";
       print "    -h --help \n";
       print "    -v --verbose \n";
+      print "    --bond=bond0 \n";
       print "\n\n";
       exit;
    }                                                    #end of if block
@@ -349,7 +351,8 @@ sub get_bond_details {
    #
    # figure out the details for the master bond interface
    #
-   $bond_details{$bond}{overall_link_failure_count} = 0;		#initialize hash element to avoid undef errors
+   $bond_details{$bond}{overall_link_down_count}    = 0;		#HINT: this tells us a link is down, so alert on this. 
+   $bond_details{$bond}{overall_link_failure_count} = 0;		#HINT: link failures is a cumulative count of all link failures since last boot, so only alert if number is really high
    $interface_name = $bond;
    if ( $bond_detail =~ /(Bonding Mode: .*?)Slave Interface/s ) {
       $interface_detail = $1;
@@ -358,6 +361,7 @@ sub get_bond_details {
       print "-----------------end master ------------------------- \n" if ($verbose eq "yes");
       if ( $interface_detail =~ /MII Status: (.*)/ ) { 
          $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+         $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
          print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
       }
       # This parameter will exist if mode=active-backup, but not if mode=LACP
@@ -384,6 +388,7 @@ sub get_bond_details {
          print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
          if ( $interface_detail =~ /MII Status: (.*)/ ) { 
             $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+            $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
             print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
          }
          if ( $interface_detail =~ /Speed: (.*)/ ) { 
@@ -411,6 +416,7 @@ sub get_bond_details {
          print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
          if ( $interface_detail =~ /MII Status: (.*)/ ) { 
             $bond_details{$bond}{$interface_name}{mii_status} = $1; 
+            $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
             print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
          }
          if ( $interface_detail =~ /Speed: (.*)/ ) { 
@@ -459,13 +465,26 @@ sub print_output {
       $common_output_data = "$common_output_data ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count}";
    }
    #
-   if ( $bond_details{$bond}{overall_link_failure_count} > 0 ) {
-       $output_message = "$CHECK_NAME WARN - detected link failure count=$bond_details{$bond}{overall_link_failure_count}  $common_output_data | $perf_data \n";
+   # This section runs if any of the ports in the bond are down
+   #
+   if ( $bond_details{$bond}{overall_link_down_count} > 0 ) {
+       $output_message = "$CHECK_NAME WARN - Detected down port in bond.   $common_output_data | $perf_data \n";
        print $output_message;			#print output to screen
        print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
        exit $WARN;
    }
+   #
+   # This section runs if all the ports int he bond are up, but >100 transient link errors exist
+   #
+   if ( $bond_details{$bond}{overall_link_failure_count} > 100 ) {
+       $output_message = "$CHECK_NAME WARN - all the ports in bond are up, but excessive link errors detected.  Link failure count=$bond_details{$bond}{overall_link_failure_count}  $common_output_data | $perf_data \n";
+       print $output_message;			#print output to screen
+       print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
+       exit $WARN;
+   }
+   #
    # we only get this far if everything is ok
+   #
    $output_message = "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
    print $output_message;			#print output to screen
    print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
