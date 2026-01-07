@@ -4,7 +4,7 @@
 
 # DESCRIPTION
 # -----------
-#  This script is a nagios check that determines the health status of an ethernet bond
+#  This script is a nagios check that determines the health status of all ethernet bonds on a Linux host
 
 
 # OUTSTANDING TASKS
@@ -16,6 +16,7 @@
 # ----------
 #  2022/11/28   njeffrey	Script created
 #  2022/12/08   njeffrey	If all ports in a bond are currently up, set alert threshold for "Link Failure Count" to 100 
+#  2026/01/04   njeffrey	Add support for 802.ad LACP bonds
 
 
 
@@ -33,18 +34,31 @@
 #   define service{
 #           use                             generic-24x7-service
 #           host_name                       linux01.example.com
-#           service_description             NIC bond0
-#           check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_linux_ethernet_bond --bond=bond0"
+#           service_description             NIC bonds
+#           check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_linux_ethernet_bond"
 #           }
 #
 #
 #
 #
+# Linux bonding modes and top-of-rack ethernet switch requirements
+# ----------------------------------------------------------------
+# mode 0 (balance-rr)     Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 1 (active-backup)  No configuration required on the switch.
+# mode 2 (balance-xor)    Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 3 (broadcast)      Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 4 (802.3ad)        Requires LACP-negotiated EtherChannel enabled.
+# mode 5 (balance-tlb)    No configuration required on the switch.
+# mode 6 (balance-alb)    No configuration required on the switch.
+#
+# HINT: for no switch config, active-backup is the easiest, or use 802.3ad for more bandwidth
+
 
 
 
 use strict;                                     #enforce good coding practices
 use Getopt::Long;                               #allow --long-switches to be used as parameters
+use warnings;					#use verbose warnings
 
 
 # declare variables
@@ -60,8 +74,6 @@ my ($scratch,$count);
 $CHECK_NAME= "NIC bond";
 $verbose = "no";                                #for debugging
 $output_filename = "/tmp/nagios.check_linux_ethernet_bond.tmp";  #temporary filename created by script
-
-
 #
 # Nagios return codes
 #
@@ -69,7 +81,6 @@ $OK       = 0;
 $WARN     = 1;
 $CRITICAL = 2;
 $UNKNOWN  = 3;
-
 
 
 sub get_options {
@@ -96,17 +107,18 @@ sub get_options {
    #
    #
    # see if user provided -h or --help switch
-   if ( (defined($opt_h)) || (!defined($opt_b))  ) {
-      print "Nagios plugin for determining health of Linux dm-mulipath SAN disk paths \n";
+   if ( (defined($opt_h)) ) {
+      print "Nagios plugin for determining health of Linux ethernet bonds \n";
       print "$0 [options]  \n";
       print "    where options are: \n";
       print "    -h --help \n";
       print "    -v --verbose \n";
-      print "    --bond=bond0 \n";
+      print "    --bond=bond0 (optional, will check all bonds by default)\n";
       print "\n\n";
       exit;
    }                                                    #end of if block
 }                       #end of subroutine
+
 
 
 
@@ -121,11 +133,8 @@ sub sanity_checks {
       print "$CHECK_NAME UNKNOWN - cannot find /proc/net/bonding directory, is the bonding kernel module installed? \n";
       exit $UNKNOWN;                                    #exit script
    }
-   if ( ! -f "/proc/net/bonding/$bond" ) {
-      print "$CHECK_NAME UNKNOWN - cannot find /proc/net/bonding/$bond file, does the bond exist? \n";
-      exit $UNKNOWN;                                    #exit script
-   }
 }                                               #end of subroutine
+
 
 
 sub check_for_output_file {
@@ -136,7 +145,6 @@ sub check_for_output_file {
    #
    #
    # delete the output file if it is more than 4 minutes (240 seconds) old (this will work when run via root user but not when run as nagios user due to permissions)
-   $output_filename = "/tmp/nagios.check_linux_ethernet_bond_$bond.tmp";  #temporary filename created by script
    if ( -e "$output_filename" )  {                                      #see if a cron job has already provided the info we need
       ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($output_filename); #get last modification time in seconds since the epoch
       $output_file_age = time - $mtime;                                 #figure out how many seconds old the file is
@@ -198,309 +206,460 @@ sub print_to_outputfile {
 
 
 
-sub get_bonding_mode {
-   #
-   print "running get_bonding_mode subroutine \n" if ($verbose eq "yes");
-   #
-   #
-   #
-   # Read the /proc/net/bonding/$bond file 
-   #
-   # A bond using LACP will look similar to the following:
-   # # cat /proc/net/bonding/bond0
-   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
-   #
-   # Bonding Mode: IEEE 802.3ad Dynamic link aggregation
-   # Transmit Hash Policy: layer2 (0)
-   # MII Status: up
-   # MII Polling Interval (ms): 100
-   # Up Delay (ms): 0
-   # Down Delay (ms): 0
-   # Peer Notification Delay (ms): 0
-   #
-   # 802.3ad info
-   # LACP rate: slow
-   # Min links: 0
-   # Aggregator selection policy (ad_select): stable
-   #
-   # Slave Interface: ens1f0
-   # MII Status: up
-   # Speed: 25000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0
-   # Permanent HW addr: 40:a6:b7:29:2e:60
-   # Slave queue ID: 0
-   # Aggregator ID: 1
-   # Actor Churn State: none
-   # Partner Churn State: none
-   # Actor Churned Count: 0
-   # Partner Churned Count: 0
-   #
-   # Slave Interface: ens1f1
-   # MII Status: up
-   # Speed: 25000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0
-   # Permanent HW addr: 40:a6:b7:29:2e:61
-   # Slave queue ID: 0
-   # Aggregator ID: 1
-   # Actor Churn State: none
-   # Partner Churn State: none
-   # Actor Churned Count: 0
-   # Partner Churned Count: 0
-   #
-   #
-   # A bond using active-backup will look similar to the following:
-   # ]$ cat /proc/net/bonding/bond1
-   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
-   #
-   # Bonding Mode: fault-tolerance (active-backup)
-   # Primary Slave: None
-   # Currently Active Slave: eno1
-   # MII Status: up
-   # MII Polling Interval (ms): 100
-   # Up Delay (ms): 0
-   # Down Delay (ms): 0
-   # Peer Notification Delay (ms): 0
-   #
-   # Slave Interface: eno1
-   # MII Status: up
-   # Speed: 10000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0
-   # Permanent HW addr: 38:68:dd:36:07:e0
-   # Slave queue ID: 0
-   #
-   # Slave Interface: eno2
-   # MII Status: up
-   # Speed: 10000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0
-   # Permanent HW addr: 38:68:dd:36:07:e1
-   # Slave queue ID: 0
-   # [nagios@lnv-db-cae-01 ~]$ cat /proc/net/bonding/bond1 |more
-   # Ethernet Channel Bonding Driver: v3.7.1 (April 27, 2011)
-   #
-   # Bonding Mode: fault-tolerance (active-backup)
-   # Primary Slave: None
-   # Currently Active Slave: eno1
-   # MII Status: up
-   # MII Polling Interval (ms): 100
-   # Up Delay (ms): 0
-   # Down Delay (ms): 0
-   # Peer Notification Delay (ms): 0
-   #
-   # Slave Interface: eno1
-   # MII Status: up
-   # Speed: 10000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0
-   # Permanent HW addr: 38:68:dd:36:07:e0
-   # Slave queue ID: 0
-   #
-   # Slave Interface: eno2
-   # MII Status: up
-   # Speed: 10000 Mbps
-   # Duplex: full
-   # Link Failure Count: 0 # Permanent HW addr: 38:68:dd:36:07:e1
-   # Slave queue ID: 0
-   #
-   $bond_details{$bond}{mode}   = "unknown";						#initialize hash element
 
-   $cmd = "/proc/net/bonding/$bond";
-   print "   reading file $cmd \n" if ($verbose eq "yes");
-   open(IN,"$cmd ") or die "Cannot open $cmd for reading $! \n";			#open filehandle for reading
-   while (<IN>) {			#read a line from the filehandle
-      if ( /^Bonding Mode: IEEE 802.3ad Dynamic link aggregation/ ) { $bond_details{$bond}{mode} = "LACP"; }		
-      if ( /^Bonding Mode: fault-tolerance \(active-backup\)/ )     { $bond_details{$bond}{mode} = "active-backup"; }		
-   }						#end of while loop
-   close IN;					#close filehandle
+############################################
+# Helper subroutines for housekeeping tasks
+############################################
+
+sub normalize_key {
+   #
+   #print "running normalize_key subroutine \n" if ($verbose eq "yes");
+   #
+   # this subroutine converts arbitrary text keys from /proc/net/bonding/* into safe consistent hash keys
+   my ($k) = @_;				#extract the input
+   $k = lc $k;					#convert to lowercase to simplify regex matching
+   $k =~ s/[^a-z0-9]+/_/g;			#replace multiple non-alphanumeric characters with a single underscore
+   $k =~ s/^_+|_+$//g;				#remove leading or trailing underscores
+   return $k; 					#return the normalized key
 }
 
 
 
-
-sub get_slave_interface_names {
+sub parse_kv_line {
    #
-   print "running get_slave_interface_names subroutine \n" if ($verbose eq "yes");
+   #print "running parse_kv_line subroutine \n" if ($verbose eq "yes");
    #
-   $cmd = "/proc/net/bonding/$bond";
-   print "   reading file $cmd \n" if ($verbose eq "yes");
-   open(IN,"$cmd ") or die "Cannot open $cmd for reading $! \n";			#open filehandle for reading
-   while (<IN>) {			#read a line from the filehandle
-      if ( /^Slave Interface: (.*)/ ) { 
-         push (@slave_interface_names,$1);
-         print "   found slave interface $1 \n" if ($verbose eq "yes");
-       }		
-   }						#end of while loop
-   close IN;					#close filehandle
+   # this subroutine parses key:value lines and returns (key,value), or returns nothing if the line is not a key:value pair
+   my ($line) = @_;
+   return unless $line =~ /^\s*([^:]+?)\s*:\s*(.*?)\s*$/; 	#key is anything before : value is anything after :
+   return ( normalize_key($1), $2 );				#call other subroutine to cleanup formatting, remove spaces, etc.
 }
 
-  
 
- 
-sub get_bond_details {
+
+sub worst_rc {				
    #
-   print "running get_bond_details subroutine \n" if ($verbose eq "yes");
+   print "      running worst_rc subroutine \n" if ($verbose eq "yes");
    #
+   #subroutine to merge multiple Nagios return code into a single "worst" return code
+   #the idea here is if there are multiple ethernet bonds, the return code should be for the most critical error
    #
-   # slurp the entire file contents into a multiline string
-   open (my $fh, "<","/proc/net/bonding/$bond") or die "Cannot open file /proc/net/bonding/$bond $! \n";
-   my $bond_detail = do { local $/; <$fh> };                #used example from https://coderwall.com/p/wul1rg/slurp-a-file-into-a-scalar
-   close $fh or die "Cannot close filehandle $! \n";
+   my ($a, $b) = @_;
+   # UNKNOWN always wins
+   return 3 if $a == 3 || $b == 3;
+   return ($a > $b) ? $a : $b;
+}
+
+
+
+sub rc_label {
    #
-   # figure out the details for the master bond interface
+   print "      running rc_label subroutine \n" if ($verbose eq "yes");
    #
-   $bond_details{$bond}{overall_link_down_count}    = 0;		#HINT: this tells us a link is down, so alert on this. 
-   $bond_details{$bond}{overall_link_failure_count} = 0;		#HINT: link failures is a cumulative count of all link failures since last boot, so only alert if number is really high
-   $interface_name = $bond;
-   if ( $bond_detail =~ /(Bonding Mode: .*?)Slave Interface/s ) {
-      $interface_detail = $1;
-      print "-----------------begin master ----------------------- \n" if ($verbose eq "yes");
-      print "$interface_detail \n"                                     if ($verbose eq "yes");
-      print "-----------------end master ------------------------- \n" if ($verbose eq "yes");
-      if ( $interface_detail =~ /MII Status: (.*)/ ) { 
-         $bond_details{$bond}{$interface_name}{mii_status} = $1; 
-         $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
-         print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
+   my ($rc) = @_;
+   return ($rc == 0) ? 'OK' :
+          ($rc == 1) ? 'WARNING' :
+          ($rc == 2) ? 'CRITICAL' : 'UNKNOWN';
+}
+
+
+
+############################################
+# Parser: one bond file
+# This subroutine reads one file from /proc/net/bonding/*
+############################################
+
+sub parse_bond_file_text {
+   #
+   print "      running parse_bond_file_text subroutine \n" if ($verbose eq "yes");
+   #
+   my ($txt) = @_;
+
+   my %out = (
+      top   => {},
+      blocks => {},
+      slaves => {},
+   );
+
+   my $section   = 'top';
+   my $block_name;
+   my $cur_slave;
+   my $subblock;
+
+   for my $line (split /\n/, $txt) {
+      $line =~ s/\r$//;
+      next if $line =~ /^\s*$/;
+
+      # Slave stanza
+      if ($line =~ /^Slave Interface:\s+(\S+)/) {
+         $cur_slave = $1;
+         $out{slaves}{$cur_slave} ||= { top => {}, blocks => {} };
+         $subblock = undef;
+         next;
       }
-      # This parameter will exist if mode=active-backup, but not if mode=LACP
-      if ( $interface_detail =~ /Currently Active Slave: (.*)/ ) { 
-         $bond_details{$bond}{$interface_name}{currently_active_slave} = $1; 
-         print "   ${interface_name}_active_slave:$bond_details{$bond}{$interface_name}{currently_active_slave} \n" if ($verbose eq "yes");
+
+      # details actor/partner lacp pdu (inside slave)
+      if (defined $cur_slave && $line =~ /^\s*details\s+(.+?)\s*:\s*$/i) {
+         $subblock = normalize_key("details_$1");
+         $out{slaves}{$cur_slave}{blocks}{$subblock} ||= {};
+         next;
+      }
+
+      # Global block header (with colon)
+      if (!defined $cur_slave &&
+         $line =~ /^([A-Za-z0-9][A-Za-z0-9 .\/_-]*)\s*:\s*$/) {
+
+         $block_name = normalize_key($1);
+         $out{blocks}{$block_name} ||= {};
+         next;
+      }
+
+      # Global block header (no colon)
+      if (!defined $cur_slave &&
+         $line =~ /^([0-9A-Za-z][0-9A-Za-z .\/_-]*)$/ &&
+         $line !~ /:/) {
+
+         $block_name = normalize_key($1);
+         $out{blocks}{$block_name} ||= {};
+         next;
+      }
+
+      # Key/value line
+      my ($k, $v) = parse_kv_line($line);
+      next unless defined $k;
+
+      if (defined $cur_slave) {
+         if (defined $subblock) {
+            $out{slaves}{$cur_slave}{blocks}{$subblock}{$k} = $v;
+         } else {
+            $out{slaves}{$cur_slave}{top}{$k} = $v;
+         }
+      } else {
+         if (defined $block_name) {
+            $out{blocks}{$block_name}{$k} = $v;
+         } else {
+            $out{top}{$k} = $v;
+         }
+      }
+   }
+
+   return \%out;					#return parsed key:value pairs to the calling subroutine
+}							#end of subroutine
+
+
+
+
+############################################
+# Read all bonds
+# Enumeration + ingestion layer for bonding parser
+# Possible enhancement, regex match will fail unless simple filenames like bond0, bond1, bond999 are used
+# Cannot use filenames like My-Special-Bond999
+############################################
+
+sub read_all_bonds_into_hash {
+   #
+   print "   running read_all_bonds_into_hash subroutine \n" if ($verbose eq "yes");
+   #
+   my %bonds;						#create a hash, each ethernet bond with be one entry
+   my $dir = '/proc/net/bonding';			#each file in this directory represents an ethernet bond
+   print "      looking for files in $dir directory \n" if ($verbose eq "yes");
+
+   opendir my $dh, $dir or return \%bonds;		#open directory handle
+   for my $entry (sort readdir $dh) {
+      next unless $entry =~ /^bond\d+$/;		#note that the filename must begin with "bond" following by any digits, will fail if crazy filenames are used!
+      my $path = "$dir/$entry";
+      next unless -r $path;
+      print "      found file $path \n" if ($verbose eq "yes");
+
+      open my $fh, '<', $path or next;			#open filehandle
+      local $/ = undef;
+      my $txt = <$fh>;					#read contents of file into scalar variable
+      close $fh;					#close filehandle
+
+      print "      calling parse_bond_file_text subroutine against $path \n" if ($verbose eq "yes");
+      $bonds{$entry} = parse_bond_file_text($txt);	#call subroutine to parse all the text into key:value pairs for the hash
+   }
+   closedir $dh;					#close directory handle that was reading filenames from /proc/net/bonding/
+
+   return \%bonds;
+}
+
+
+
+############################################
+# Mode detection
+# Figure out which of the following modes is used by each bond
+# mode 0 (balance-rr)     Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 1 (active-backup)  No configuration required on the switch.
+# mode 2 (balance-xor)    Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 3 (broadcast)      Requires static EtherChannel enabled, not LACP-negotiated.
+# mode 4 (802.3ad)        Requires LACP-negotiated EtherChannel enabled.
+# mode 5 (balance-tlb)    No configuration required on the switch.
+# mode 6 (balance-alb)    No configuration required on the switch.
+############################################
+
+sub parse_mode_family {
+   #
+   print "      running parse_mode_family subroutine \n" if ($verbose eq "yes");
+   #
+   my ($mode) = @_;
+   $mode //= '';					# //= means assign the right-hand value only if the left-hand value is undefined
+   $mode = lc $mode;					# lc means convert to lowercase
+   #
+   if ($mode =~ /802\.3ad/) {
+      print "         detected bond mode: $mode \n" if ($verbose eq "yes");
+      return 'lacp'; 					#send this value back to the calling subroutine
+   }
+   elsif ($mode =~ /active-backup/) {
+      print "         detected bond mode: $mode \n" if ($verbose eq "yes");
+      return 'active_backup';				#send this value back to the calling subroutine
+   }
+   elsif ($mode =~ /balance-/) {			#this covers balance-rr balance-alb balance-tlb
+      print "         detected bond mode: $mode \n" if ($verbose eq "yes");
+      return 'balance'; 				#send this value back to the calling subroutine
+   }
+   elsif ($mode =~ /broadcast/) {
+      print "         detected bond mode: $mode \n" if ($verbose eq "yes");
+      return 'broadcast';				#send this value back to the calling subroutine
+   }
+   else { 						#only get this far if none of the bond modes were detected
+      print "         Could not detect bond mode! \n" if ($verbose eq "yes");
+      return 'unknown';					#send this value back to the calling subroutine	
+   }
+}							#end of subroutine
+
+
+
+############################################
+# Common checks
+############################################
+
+sub eval_common {
+   #
+   print "      running eval_common subroutine \n" if ($verbose eq "yes");
+   #
+   my ($B) = @_;
+   my @msgs;
+   my %perf;
+   my $rc = 0;
+
+   my $mii = lc(($B->{top}{mii_status} // ''));
+   if ($mii ne 'up') {
+      $rc = 2;
+      push @msgs, "bond_mii=$mii";
+   }
+   #
+   for my $if (keys %{ $B->{slaves} }) {
+      my $lfc = $B->{slaves}{$if}{top}{link_failure_count};
+      $lfc = (defined $lfc && $lfc =~ /^\d+$/) ? $lfc : 0;
+      $perf{"lfc_$if"} = $lfc;
+   }
+   #
+   return ($rc, \@msgs, \%perf);
+}
+
+
+
+############################################
+# LACP evaluator (WARN degradation, CRIT outage)
+############################################
+
+sub eval_lacp {
+   #
+   print "   running eval_lacp subroutine \n" if ($verbose eq "yes");
+   #
+   my ($B) = @_;
+   my ($rc, $msgs, $perf) = eval_common($B);
+
+   my $agg = $B->{blocks}{active_aggregator_info} // {};
+   my $agg_id = $agg->{aggregator_id};
+
+   my $usable = 0;
+   for my $if (keys %{ $B->{slaves} }) {
+      my $S = $B->{slaves}{$if};
+      my $ok = 1;
+
+      $ok = 0 if lc(($S->{top}{mii_status} // '')) ne 'up';
+      $ok = 0 if defined $agg_id && $S->{top}{aggregator_id} ne $agg_id;
+
+      my $pmac = lc(($S->{blocks}{details_partner_lacp_pdu}{system_mac_address} // ''));
+      $ok = 0 if !$pmac || $pmac eq '00:00:00:00:00:00';
+
+      my $a = $S->{blocks}{details_actor_lacp_pdu}{port_state};
+      my $p = $S->{blocks}{details_partner_lacp_pdu}{port_state};
+      $ok = 0 if !defined $a || $a != 61 || !defined $p || $p != 61;
+
+      $usable++ if $ok;
+   }
+
+   $perf->{usable_ports} = $usable;
+
+   if ($usable == 0) {
+      $rc = worst_rc($rc, 2);
+      push @$msgs, "no_usable_ports";
+   } elsif ($usable == 1) {
+      $rc = worst_rc($rc, 1);
+      push @$msgs, "redundancy_lost";
+   }
+
+   return ($rc, $msgs, $perf);
+}
+
+
+
+############################################
+# Active-backup evaluator
+############################################
+
+sub eval_active_backup {
+   #
+   print "   running eval_active_backup subroutine \n" if ($verbose eq "yes");
+   #
+   my ($B) = @_;
+   print "      calling eval_common subroutine \n" if ($verbose eq "yes");
+   my ($rc, $msgs, $perf) = eval_common($B);
+
+   my @ifs = keys %{ $B->{slaves} };
+   my $up = 0;
+   for my $if (@ifs) {
+      $up++ if lc(($B->{slaves}{$if}{top}{mii_status} // '')) eq 'up';
+   }
+
+   $perf->{slaves_up} = $up;
+
+   if ($up == 0) {
+      $rc = worst_rc($rc, 2);
+      push @$msgs, "no_slaves_up";
+   } elsif ($up == 1) {
+      $rc = worst_rc($rc, 1);
+      push @$msgs, "redundancy_lost";
+   }
+
+   return ($rc, $msgs, $perf);
+}
+
+
+
+############################################
+# Balance-* / broadcast evaluator
+# This covers balance-rr balance-tlb balance-alb
+############################################
+
+sub eval_balance {
+   #
+   print "   running eval_balance subroutine \n" if ($verbose eq "yes");
+   #
+   my ($B) = @_;
+   my ($rc, $msgs, $perf) = eval_common($B);
+
+   my $up = 0;
+   for my $if (keys %{ $B->{slaves} }) {
+      $up++ if lc(($B->{slaves}{$if}{top}{mii_status} // '')) eq 'up';
+   }
+
+   $perf->{slaves_up} = $up;
+
+   if ($up == 0) {
+      $rc = worst_rc($rc, 2);
+      push @$msgs, "no_slaves_up";
+   } elsif ($up == 1) {
+      $rc = worst_rc($rc, 1);
+      push @$msgs, "redundancy_lost";
+   }
+
+   return ($rc, $msgs, $perf);
+}
+
+
+
+############################################
+# Dispatcher
+############################################
+
+sub evaluate_bond {
+   #
+   print "   running evaluate_bond subroutine \n" if ($verbose eq "yes");
+   #
+   my ($B) = @_;
+   print "      calling parse_mode_family subroutine \n" if ($verbose eq "yes");
+   my $mode = parse_mode_family($B->{top}{bonding_mode});
+   return eval_lacp($B)          if $mode eq 'lacp';
+   return eval_active_backup($B) if $mode eq 'active_backup';
+   return eval_balance($B)       if $mode eq 'balance' || $mode eq 'broadcast';
+   # UNKNOWN: unsupported or missing bonding mode
+   return (3, ["unknown_mode"], {});
+}								#end of subroutine
+
+
+
+
+
+
+
+
+
+# make these variables global so they will be visible to print_output subroutine
+my ($ALL,$overall_rc,@summary,%perf);
+$overall_rc = 0;					#initialize variable
+sub get_all_bond_details {
+   #
+   print "running get_all_bond_details subroutine \n" if ($verbose eq "yes");
+   #
+   print "   calling read_all_bonds_into_hash subroutine \n" if ($verbose eq "yes");
+   $ALL = read_all_bonds_into_hash();
+   if (!keys %$ALL) {
+      print "UNKNOWN - no bonding interfaces found\n";
+      exit $UNKNOWN;
+   }
+    
+   for my $bond (sort keys %$ALL) {
+      my ($rc, $msgs, $p) = evaluate_bond($ALL->{$bond});
+      $overall_rc = worst_rc($overall_rc, $rc);
+
+      my $cap = $p->{usable_ports} // $p->{slaves_up} // '';
+      my $hint = @$msgs ? $msgs->[0] : 'healthy';
+
+      push @summary, "$bond:" . rc_label($rc) . ($cap ne '' ? "($cap)" : '') . "[$hint]";
+      #
+      # capture all the performance data into a hash
+      #
+      for my $k (keys %$p) {
+         $perf{"${bond}_$k"} = $p->{$k};
       }
    }
    #
-   # Get the details for each of the slave interface
+   # join the nagios output message and performance data into readable output
    #
-   $count = 0;
-   $interface_name = "";
-   foreach (@slave_interface_names) {
-      $interface_name = $slave_interface_names[$count];
-      print "   checking slave interface $interface_name \n" if ($verbose eq "yes");
-      # 
-      # This regex is for the stanza for slave interfaces if the master is in LACP mode
-      #
-      if ( $bond_detail =~ /(Slave Interface: $interface_name.*?)Partner Churned Count:/s ) { 		# use .*? instead of .* to make this a non-greedy match so we only get one stanza at a time
-         $interface_detail = $1;
-         print "-----------------begin slave $count----------------------- \n" if ($verbose eq "yes");
-         print "$interface_detail                                          \n" if ($verbose eq "yes");                             
-         print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
-         if ( $interface_detail =~ /MII Status: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{mii_status} = $1; 
-            $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
-            print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Speed: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{speed} = $1; 
-            print "   ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Link Failure Count: ([0-9]+)/ ) { 
-            $bond_details{$bond}{$interface_name}{link_failure_count} = $1; 
-            $bond_details{$bond}{overall_link_failure_count} = $bond_details{$bond}{overall_link_failure_count} + $bond_details{$bond}{$interface_name}{link_failure_count};  #running total of all link failures on all adapters
-            
-            print "   ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Permanent HW addr: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{mac_address} = $1; 
-            print "   ${interface_name}_mac_address:$bond_details{$bond}{$interface_name}{mac_address} \n" if ($verbose eq "yes");
-         }
-      }
-      # 
-      # This regex is for the stanza for slave interfaces if the master is in active-backup mode
-      #
-      if ( $bond_detail =~ /(Slave Interface: $interface_name.*?)Slave queue ID:/s ) { 		# use .*? instead of .* to make this a non-greedy match so we only get one stanza at a time
-         $interface_detail = $1;
-         print "-----------------begin slave $count----------------------- \n" if ($verbose eq "yes");
-         print "$interface_detail                                          \n" if ($verbose eq "yes");
-         print "-----------------end   slave $count----------------------- \n" if ($verbose eq "yes");
-         if ( $interface_detail =~ /MII Status: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{mii_status} = $1; 
-            $bond_details{$bond}{overall_link_down_count}++ if ( $bond_details{$bond}{$interface_name}{mii_status} ne "up"); #increment counter for down links
-            print "   ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Speed: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{speed} = $1; 
-            print "   ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Link Failure Count: ([0-9]+)/ ) { 
-            $bond_details{$bond}{$interface_name}{link_failure_count} = $1; 
-            print "   ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count} \n" if ($verbose eq "yes");
-         }
-         if ( $interface_detail =~ /Permanent HW addr: (.*)/ ) { 
-            $bond_details{$bond}{$interface_name}{mac_address} = $1; 
-            print "   ${interface_name}_mac_address:$bond_details{$bond}{$interface_name}{mac_address} \n" if ($verbose eq "yes");
-         }
-      }
-      $count++;										#increment counter
-   } 
-}                                               #end of subroutine
+   $output_message = rc_label($overall_rc) . " - bonds " . join(' ; ', @summary);
+   $perf_data = join(' ', map { "$_=$perf{$_}" } sort keys %perf);
+   print "end of get_all_bond_details subroutine \n" if ($verbose eq "yes");
+}								#end of subroutine
 
 
 
+
+############################################
+# print output message
+############################################
 
 sub print_output {
    #
    print "running print_output subroutine \n" if ($verbose eq "yes");
    #
+   # print the nagios output and return code
    #
-   # The nagios performance data will be the same for all the outputs, so just put it in a common variable
-   # The format is:  label=value[UOM];[warn];[crit];[min];[max]
-   # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
-   # You can have multiple items of perf data, just separate each section with a space
-   # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "";
-   #
-   #
-   $interface_name = $bond;
-   $common_output_data = "${interface_name}_mode:$bond_details{$bond}{mode} ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ";
-   #
-   # if bond is in active-passive mode, add this value to commont output
-   if ( $bond_details{$bond}{mode} eq "active-passive" ) {
-      $common_output_data = "$common_output_data active_slave:$bond_details{$bond}{$interface_name}{currently_active_slave} ";
-   }
-   #
-   # add the slave interfaces to the common output
-   foreach $interface_name (@slave_interface_names) {
-      $common_output_data = "$common_output_data ${interface_name}_status:$bond_details{$bond}{$interface_name}{mii_status} ${interface_name}_speed:$bond_details{$bond}{$interface_name}{speed} ${interface_name}_link_failure_count:$bond_details{$bond}{$interface_name}{link_failure_count}";
-   }
-   #
-   # This section runs if any of the ports in the bond are down
-   #
-   if ( $bond_details{$bond}{overall_link_down_count} > 0 ) {
-       $output_message = "$CHECK_NAME WARN - Detected down port in bond.   $common_output_data | $perf_data \n";
-       print $output_message;			#print output to screen
-       print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
-       exit $WARN;
-   }
-   #
-   # This section runs if all the ports int he bond are up, but >100 transient link errors exist
-   #
-   if ( $bond_details{$bond}{overall_link_failure_count} > 100 ) {
-       $output_message = "$CHECK_NAME WARN - all the ports in bond are up, but excessive link errors detected.  Link failure count=$bond_details{$bond}{overall_link_failure_count}  $common_output_data | $perf_data \n";
-       print $output_message;			#print output to screen
-       print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
-       exit $WARN;
-   }
-   #
-   # we only get this far if everything is ok
-   #
-   $output_message = "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
-   print $output_message;			#print output to screen
-   print_to_outputfile;			#call subroutine to confirm $output_filename is used for subsequent runs
-   exit $OK;
-}                       #end of subroutine
+   print "$output_message | $perf_data\n";
+   print_to_outputfile; 			# save the output to a temporary file in case this script needs root permissions to run from cron
+   exit $overall_rc;
+}							#end of subroutine
 
 
 
-
-# ----------------- main body of script ---------------------------
+############################################
+# main body of script
+############################################
 get_options;
 sanity_checks;
 check_for_output_file;
-get_bonding_mode;
-get_slave_interface_names;
-get_bond_details;
+get_all_bond_details;
 print_output;
-
-
